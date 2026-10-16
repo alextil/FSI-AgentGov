@@ -457,13 +457,20 @@ For each rule below, use this navigation:
 
 ```kql
 let lookback = 30m;
-CopilotActivity
+let interactions = CopilotActivity
 | where TimeGenerated > ago(lookback)
-| where RecordType == "CopilotInteraction"
-| mv-expand Resource = LLMEventData.AccessedResources
-| where tobool(Resource.XPIADetected) == true
+| where RecordType == "CopilotInteraction";
+union
+    (interactions
+    | mv-expand Message = LLMEventData.Messages
+    | where tobool(Message.JailbreakDetected) == true
+    | extend IndicatorType = "JailbreakDetected", ResourceId = ""),
+    (interactions
+    | mv-expand Resource = LLMEventData.AccessedResources
+    | where tobool(Resource.XPIADetected) == true
+    | extend IndicatorType = "XPIADetected", ResourceId = tostring(Resource.ID))
 | project TimeGenerated, ActorName, ActorUserId, AgentId, RecordId, SrcIpAddr,
-          ResourceId = tostring(Resource.ID)
+          IndicatorType, ResourceId
 ```
 
 !!! info "Detection caveat"
