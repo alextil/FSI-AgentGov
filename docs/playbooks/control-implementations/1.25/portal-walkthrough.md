@@ -1,6 +1,8 @@
 # Portal Walkthrough: Control 1.25 - MIME Type Restrictions for File Uploads
 
-**Last Updated:** May 2026
+**Last Updated:** October 2026
+
+> **Control 1.5 dependency checked 2026-10-16 (documentation only):** Defender for Cloud Apps file policies retire **January 6, 2027**. Treat the legacy steps/checklist below as interim only, verify supported connected-app coverage, and plan migration to [Purview DLP or auto-labeling](https://learn.microsoft.com/en-us/defender-cloud-apps/migrate-file-policies-to-purview). A connected-app file scan does not establish synchronous inspection of arbitrary direct agent uploads. No tenant/UI test was performed.
 **Portals:** Power Platform Admin Center (PPAC), Microsoft Copilot Studio, Microsoft Defender for Cloud Apps, SharePoint Admin Center
 **Estimated Time:** 30-45 minutes (full Zone 3 walkthrough including per-agent and Defender for Cloud Apps configuration)
 
@@ -102,7 +104,9 @@
 
 ### Step 7: Configure Defender for Cloud Apps File Policy (Zone 3 Magic-Byte Inspection)
 
-> **Required for Zone 3.** PPAC and per-agent settings inspect the *declared* file extension and MIME header. A file renamed `invoice.pdf` whose magic bytes are `MZ` (Windows executable) will pass PPAC checks. Defender for Cloud Apps (formerly MCAS) provides the true-content-type inspection layer.
+Use this legacy procedure only for a supported connected app before retirement; validate the replacement's actual file-type conditions and governance actions rather than assuming one-to-one migration.
+
+> **Required for Zone 3.** Validate true-content-type inspection separately from declared extension/MIME settings; an allowlisted name/header is not proof of safe content. Defender for Cloud Apps file policies can inspect supported connected-app repositories, not arbitrary direct agent uploads. Record any unsupported upload-path inspection gap and an approved compensating control; this step does not establish universal interception.
 
 1. Open [Microsoft Defender XDR portal](https://security.microsoft.com) → **Cloud apps** → **Policies** → **Policy management** → **File policy**
 2. **Create policy** → **File policy**

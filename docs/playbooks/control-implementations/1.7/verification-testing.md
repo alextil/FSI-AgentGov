@@ -363,32 +363,55 @@ Test authoring independently: publish a sandbox agent and find `BotUpdateOperati
 
 #### CAP-06 — DLP override justification reaches audit (Control 1.5 cross-link)
 
-**Expected:** when a user overrides a Control 1.5 Generative AI DLP policy tip with a justification, the justification text is captured in the audit log and joinable to the originating `CopilotInteraction` event.
+**Expected:** a controlled SharePoint/OneDrive DLP override produces `DlpRuleUndo` with `ExceptionInfo.Reason = Override` and the marker in `ExceptionInfo.Justification`. Do not assume Copilot processing restrictions support override or that this file event automatically joins to `CopilotInteraction`. Dependency checked 2026-10-16 against the [DLP audit schema](https://learn.microsoft.com/en-us/office/office-365-management-api/office-365-management-activity-api-schema) and [Copilot DLP](https://learn.microsoft.com/en-us/purview/dlp-microsoft365-copilot-location-learn-about); documentation only, no tenant execution.
 
 ```powershell
-# Trigger: from a test account, send a Copilot prompt that should hit a DLP policy with override-with-justification.
-# Override the tip with a deterministic marker string, e.g.:
-$marker = "FSI-1.7-DLP-override-test-$([guid]::NewGuid())"
-# (Operator action in the Copilot client; record marker in the test log.)
+function Get-FsiDlpOverrideEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string]$Marker,
+        [Parameter(Mandatory)] [datetimeoffset]$TriggeredAtUtc,
+        [Parameter(Mandatory)] [datetimeoffset]$ObservationDeadlineUtc,
+        [datetimeoffset]$AsOfUtc = [datetimeoffset]::UtcNow
+    )
 
-Start-Sleep -Seconds 5400   # empirical audit propagation window — see CAP-08
+    if ($ObservationDeadlineUtc -le $TriggeredAtUtc -or $AsOfUtc -lt $TriggeredAtUtc) {
+        throw 'Use the confirmed trigger time and a later, firm-approved observation deadline.'
+    }
+    $rows = @(Search-AuditLogPaged `
+        -StartDate $TriggeredAtUtc.UtcDateTime -EndDate $AsOfUtc.UtcDateTime `
+        -RecordTypes @('ComplianceDLPSharePoint') -ErrorAction Stop)
+    $dlpRows = @(foreach ($row in $rows) {
+        $event = $row.AuditData | ConvertFrom-Json -ErrorAction Stop
+        if ($event.Operation -ne 'DlpRuleUndo') { continue }
+        $exception = $event.ExceptionInfo
+        if ($exception -is [string]) {
+            $exception = $exception | ConvertFrom-Json -ErrorAction Stop
+        }
+        if ($null -eq $exception) { continue }
+        if ($exception.Reason -eq 'Override' -and $exception.Justification -eq $Marker) {
+            $row
+        }
+    })
 
-$dlpRows = Search-AuditLogPaged `
-    -StartDate (Get-Date).AddHours(-3) -EndDate (Get-Date) `
-    -RecordTypes @('DLPEndpoint','ComplianceDLPSharePoint','ComplianceDLPExchange') `
-    | Where-Object { $_.AuditData -match $marker }
-
-$cap06 = [pscustomobject]@{
-    testId          = 'CAP-06'
-    collectorField  = 'audit.dlp.overrideJustificationCaptured'
-    marker          = $marker
-    rowsFound       = $dlpRows.Count
-    status          = if ($dlpRows.Count -gt 0) { 'PASS' } else { 'FAIL' }
-    capturedAtUtc   = (Get-Date).ToUniversalTime().ToString('o')
+    [pscustomobject]@{
+        testId          = 'CAP-06'
+        collectorField  = 'audit.dlp.overrideJustificationCaptured'
+        marker          = $Marker
+        triggeredAtUtc  = $TriggeredAtUtc.UtcDateTime.ToString('o')
+        deadlineUtc     = $ObservationDeadlineUtc.UtcDateTime.ToString('o')
+        rowsFound       = $dlpRows.Count
+        status          = if ($dlpRows.Count -gt 0) { 'PASS' }
+                          elseif ($AsOfUtc -ge $ObservationDeadlineUtc) { 'FAIL' }
+                          else { 'PENDING' }
+        capturedAtUtc   = $AsOfUtc.UtcDateTime.ToString('o')
+    }
 }
-$cap06 | Save-AuditEvidence -Name 'CAP-06_DLPOverrideJustification'
-$cap06
 ```
+
+Before the controlled override, choose a unique marker. Retain that exact justification, the confirmed trigger UTC, the file/policy/user identifiers, and a **firm-approved observation deadline** in the test record. Invoke `Get-FsiDlpOverrideEvidence` with those retained values on every run, then pass its result to `Save-AuditEvidence -Name 'CAP-06_DLPOverrideJustification'`. Never generate a replacement marker or move the deadline when rechecking the same event.
+
+The audit schema declares `ExceptionInfo` as a serialized string; decode it after `AuditData` (the helper also accepts an already-decoded object). Query/parse errors must halt collection as **Error**, not count as negative evidence. The paged collector must complete the full retained window; split windows beyond its documented query limit. Before the local deadline an absent event is `PENDING`; at/after it, absence is `FAIL` and requires investigation. This deadline is an organizational escalation threshold, **not** a Microsoft ingestion SLA. Also apply Control 1.5's two-consecutive-run escalation; a failed/unknown trigger must be investigated rather than certified as a missing emitted event.
 
 #### CAP-07 — `MailItemsAccessed` firing for regulated mailboxes (Audit Premium)
 
@@ -620,7 +643,7 @@ An empty queue, a nonnegative queue count, or a hard-coded `reviewerActionTaken 
 1. Pick one AI agent and one date range (rotate quarterly).
 2. Run a complete reconstruction: `Search-AuditLogPaged` against `CopilotInteraction` + `ConnectedAIAppInteraction` for the agent, the user(s), and the date range.
 3. Resolve each `Messages[].ID` from the audit results to its body via eDiscovery (Premium) or DSPM for AI.
-4. Cross-reference any DLP override events (Control 1.5) by joining on user, time window, and `Messages[].ID`.
+4. Review DLP override evidence from CAP-06 separately using its actual workload/event/policy/user/time identifiers. Do not assume a SharePoint/OneDrive override shares `Messages[].ID` with a Copilot interaction.
 5. Export results, SHA-256 hash, copy to immutable storage (PRES-A) or third-party archive (PRES-B).
 6. File the search query, exported records, hash, and a chain-of-custody note in the audit binder.
 7. Brief the compliance team on retrieval time.
@@ -727,7 +750,7 @@ $tamp01
 
 1. The `CopilotInteraction` audit record (capture tier).
 2. The Substrate-stored prompt/response body retrieved via DSPM for AI or eDiscovery (Premium) (content tier).
-3. The DLP event in the audit log if any override was triggered (Control 1.5).
+3. DLP evidence is a separate CAP-06 correlation check, not an assumed `Messages[].ID` join or Copilot override.
 4. The Sentinel ingestion record for the same interaction (Control 3.9).
 
 ```powershell
@@ -743,10 +766,8 @@ $auditRow = $pick
 # 2. Substrate body — operator confirms the same MessageId resolves in DSPM for AI Activity explorer / eDiscovery review
 $bodyResolved = $true   # operator-confirmed flag
 
-# 3. DLP event — search for the same MessageId in DLP RecordTypes
-$dlpRow = Search-AuditLogPaged -StartDate $pick.CreationDate.AddMinutes(-5) -EndDate $pick.CreationDate.AddMinutes(5) `
-    -RecordTypes @('DLPEndpoint','ComplianceDLPSharePoint','ComplianceDLPExchange') `
-    | Where-Object { $_.AuditData -match $messageId }
+# 3. DLP is verified separately in CAP-06; no universal Copilot message-ID join.
+$dlpRow = $null
 
 # 4. Sentinel — operator runs the corresponding KQL in the SIEM and confirms presence
 $sentinelRowPresent = $true   # operator-confirmed flag
